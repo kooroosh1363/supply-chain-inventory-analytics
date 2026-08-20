@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import re
+
 import numpy as np
 import pandas as pd
+
+
+REQUIRED_SOURCE_COLUMNS = {
+    "total_outbound",
+    "outbound_number",
+    "expire_date",
+    "pal_grossweight",
+    "pal_height",
+    "units_per_pal",
+}
 
 
 def _norm(name: str) -> str:
@@ -10,36 +21,51 @@ def _norm(name: str) -> str:
 
 
 def clean_sku_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the real UCI headers and expose stable analytical names."""
     out = df.copy()
     out.columns = [_norm(c) for c in out.columns]
+
+    # Exact headers observed in UCI's sku_data.xlsx, plus documented aliases.
     aliases = {
-        "unit_weight_kg": "unit_weight",
-        "pallet_width_m": "pallet_width",
-        "pallet_length_m": "pallet_length",
-        "pallet_height_m": "pallet_height",
-        "shelf_life_days": "shelf_life",
+        "total_outbound": "outbound_pallets",
+        "outbound_number": "outbound_orders",
+        "expire_date": "shelf_life_days",
+        "pal_grossweight": "pallet_gross_weight_kg",
+        "pal_height": "pallet_height_cm",
+        "units_per_pal": "units_per_pallet",
+        "unitprice": "unit_price_eur",
+        # Defensive aliases for human-readable/export variants.
         "total_outbound_pallets": "outbound_pallets",
         "number_of_outbound_orders": "outbound_orders",
+        "shelf_life": "shelf_life_days",
+        "pallet_gross_weight": "pallet_gross_weight_kg",
+        "pallet_height": "pallet_height_cm",
     }
     for source, target in aliases.items():
         if source in out.columns and target not in out.columns:
             out[target] = out[source]
+
+    required = {
+        "outbound_pallets",
+        "outbound_orders",
+        "shelf_life_days",
+        "pallet_gross_weight_kg",
+        "pallet_height_cm",
+        "units_per_pallet",
+    }
+    missing = sorted(required.difference(out.columns))
+    if missing:
+        raise ValueError(
+            f"UCI SKU schema missing required normalized columns: {missing}; "
+            f"available={sorted(out.columns.tolist())}"
+        )
     return out
-
-
-def _first_existing(df: pd.DataFrame, candidates: list[str]) -> str:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    raise ValueError(f"None of the required columns found: {candidates}; available={list(df.columns)}")
 
 
 def prepare_metrics(df: pd.DataFrame) -> pd.DataFrame:
     x = clean_sku_data(df)
-    pallets = _first_existing(x, ["outbound_pallets", "total_outbound_pallets", "total_pallets"])
-    orders = _first_existing(x, ["outbound_orders", "number_of_outbound_orders", "orders"])
-    x["demand_pallets"] = pd.to_numeric(x[pallets], errors="coerce").fillna(0)
-    x["order_frequency"] = pd.to_numeric(x[orders], errors="coerce").fillna(0)
+    x["demand_pallets"] = pd.to_numeric(x["outbound_pallets"], errors="coerce").fillna(0)
+    x["order_frequency"] = pd.to_numeric(x["outbound_orders"], errors="coerce").fillna(0)
     x["avg_pallets_per_order"] = np.where(
         x["order_frequency"] > 0,
         x["demand_pallets"] / x["order_frequency"],
@@ -49,34 +75,35 @@ def prepare_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def abc_classification(df: pd.DataFrame) -> pd.DataFrame:
+    """Pareto-style demand classes, including the threshold-crossing SKU in its class."""
     x = prepare_metrics(df).sort_values("demand_pallets", ascending=False).copy()
     total = x["demand_pallets"].sum()
-    x["demand_share_pct"] = np.where(total > 0, 100 * x["demand_pallets"] / total, 0)
+    x["demand_share_pct"] = np.where(total > 0, 100 * x["demand_pallets"] / total, 0.0)
     x["cumulative_demand_share_pct"] = x["demand_share_pct"].cumsum()
+    previous_cumulative = x["cumulative_demand_share_pct"] - x["demand_share_pct"]
     x["abc_class"] = np.select(
-        [x["cumulative_demand_share_pct"] <= 80, x["cumulative_demand_share_pct"] <= 95],
-        ["A", "B"], default="C"
+        [previous_cumulative < 80, previous_cumulative < 95],
+        ["A", "B"],
+        default="C",
     )
     return x
 
 
 def velocity_segments(df: pd.DataFrame) -> pd.DataFrame:
+    """Frequency segmentation using percentile rank; robust to duplicate quantile cut points."""
     x = prepare_metrics(df)
-    q1 = x["order_frequency"].quantile(0.33)
-    q2 = x["order_frequency"].quantile(0.67)
-    x["velocity_segment"] = pd.cut(
-        x["order_frequency"],
-        bins=[-np.inf, q1, q2, np.inf],
-        labels=["slow", "medium", "fast"],
-        include_lowest=True,
+    pct_rank = x["order_frequency"].rank(method="average", pct=True)
+    x["velocity_segment"] = np.select(
+        [pct_rank <= 1 / 3, pct_rank <= 2 / 3],
+        ["slow", "medium"],
+        default="fast",
     )
     return x
 
 
 def shelf_life_risk(df: pd.DataFrame) -> pd.DataFrame:
     x = prepare_metrics(df)
-    shelf = _first_existing(x, ["shelf_life", "shelf_life_days"])
-    days = pd.to_numeric(x[shelf], errors="coerce")
+    days = pd.to_numeric(x["shelf_life_days"], errors="coerce")
     x["shelf_life_days"] = days
     x["shelf_life_band"] = pd.cut(
         days,
@@ -91,22 +118,23 @@ def shelf_life_risk(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def handling_profile(df: pd.DataFrame) -> pd.DataFrame:
+    """Describe physical throughput; this is not labor cost or warehouse effort."""
     x = prepare_metrics(df)
-    height = _first_existing(x, ["pallet_height", "pallet_height_m"])
-    units = _first_existing(x, ["units_per_pallet", "quantity_per_pallet"])
-    x["pallet_height_value"] = pd.to_numeric(x[height], errors="coerce")
-    x["units_per_pallet_value"] = pd.to_numeric(x[units], errors="coerce")
-    x["handling_intensity"] = x["demand_pallets"] * x["pallet_height_value"]
-    return x.sort_values("handling_intensity", ascending=False)
+    x["pallet_gross_weight_kg"] = pd.to_numeric(x["pallet_gross_weight_kg"], errors="coerce")
+    x["pallet_height_cm"] = pd.to_numeric(x["pallet_height_cm"], errors="coerce")
+    x["units_per_pallet"] = pd.to_numeric(x["units_per_pallet"], errors="coerce")
+    x["gross_weight_throughput_kg"] = x["demand_pallets"] * x["pallet_gross_weight_kg"]
+    return x.sort_values("gross_weight_throughput_kg", ascending=False)
 
 
 def executive_summary(df: pd.DataFrame) -> pd.DataFrame:
     abc = abc_classification(df)
+    a = abc["abc_class"].eq("A")
     return pd.DataFrame([{
         "skus": len(abc),
         "total_outbound_pallets": round(float(abc["demand_pallets"].sum()), 2),
         "total_outbound_orders": round(float(abc["order_frequency"].sum()), 2),
-        "a_class_skus": int((abc["abc_class"] == "A").sum()),
-        "a_class_demand_share_pct": round(float(abc.loc[abc["abc_class"] == "A", "demand_share_pct"].sum()), 2),
+        "a_class_skus": int(a.sum()),
+        "a_class_demand_share_pct": round(float(abc.loc[a, "demand_share_pct"].sum()), 2),
         "median_pallets_per_order": round(float(abc["avg_pallets_per_order"].median()), 2),
     }])
