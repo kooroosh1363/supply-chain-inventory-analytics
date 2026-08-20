@@ -1,0 +1,30 @@
+name: Supply Chain Analytics CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  analytics-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m pytest -q
+      - name: Download official UCI SKU data
+        run: python -m src.download_data
+      - name: Execute analytics pipeline
+        run: python -m src.run_analysis
+      - name: Validate deliverables
+        run: |
+          test -s outputs/executive_summary.csv
+          test -s outputs/abc_sku_prioritization.csv
+          test -s outputs/velocity_segments.csv
+          test -s outputs/shelf_life_risk.csv
+          test -s outputs/handling_profile.csv
