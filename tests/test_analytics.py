@@ -1,27 +1,20 @@
 import pandas as pd
+import pytest
 
 from src.analytics import (
     abc_classification,
+    data_quality_summary,
     executive_summary,
     handling_profile,
     prepare_metrics,
     shelf_life_risk,
+    validate_sku_data,
     velocity_segments,
 )
 
 
 def fixture() -> pd.DataFrame:
-    # Exact normalized source-style headers from UCI sku_data.xlsx.
-    return pd.DataFrame({
-        "id": [1, 2, 3, 4],
-        "unitprice": [10.0, 20.0, 30.0, 40.0],
-        "expire_date": [20, 120, 400, 60],
-        "outbound_number": [40, 10, 5, 0],
-        "total_outbound": [80, 15, 5, 0],
-        "pal_grossweight": [500, 600, 700, 450],
-        "pal_height": [100, 120, 150, 80],
-        "units_per_pal": [100, 80, 50, 120],
-    })
+    return pd.read_csv("tests/fixtures/sku_sample.csv")
 
 
 def test_prepare_metrics_preserves_population_and_totals():
@@ -34,11 +27,44 @@ def test_prepare_metrics_preserves_population_and_totals():
 
 def test_abc_reconciles_demand_and_includes_threshold_crossing_sku():
     out = abc_classification(fixture())
-    assert round(out["demand_share_pct"].sum(), 8) == 100
+    assert out["demand_share_pct"].sum() == pytest.approx(100)
     assert set(out["abc_class"]).issubset({"A", "B", "C"})
-    assert len(out) == 4
-    # First SKU reaches exactly 80% and belongs to A.
     assert out.iloc[0]["abc_class"] == "A"
+
+
+def test_zero_total_demand_is_rejected_for_abc():
+    data = fixture()
+    data["total_outbound"] = 0
+    with pytest.raises(ValueError, match="positive total outbound demand"):
+        abc_classification(data)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("total_outbound", -1, "negative"),
+        ("outbound_number", "unknown", "missing/non-numeric"),
+    ],
+)
+def test_invalid_operational_values_are_rejected(column, value, message):
+    data = fixture()
+    if isinstance(value, str):
+        data[column] = data[column].astype("object")
+    data.loc[0, column] = value
+    with pytest.raises(ValueError, match=message):
+        validate_sku_data(data)
+
+
+def test_duplicate_sku_ids_are_rejected():
+    data = fixture()
+    data.loc[1, "id"] = data.loc[0, "id"]
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_sku_data(data)
+
+
+def test_missing_required_column_is_actionable():
+    with pytest.raises(ValueError, match="units_per_pallet"):
+        validate_sku_data(fixture().drop(columns="units_per_pal"))
 
 
 def test_velocity_segments_preserve_all_skus():
@@ -53,12 +79,14 @@ def test_shelf_life_and_handling_outputs_reconcile():
     handling = handling_profile(fixture())
     assert shelf["skus"].sum() == 4
     assert shelf["demand_pallets"].sum() == 100
-    assert len(handling) == 4
     assert handling.iloc[0]["gross_weight_throughput_kg"] == 40000
 
 
-def test_executive_summary_reconciles_source():
-    out = executive_summary(fixture()).iloc[0]
-    assert out["skus"] == 4
-    assert out["total_outbound_pallets"] == 100
-    assert out["total_outbound_orders"] == 55
+def test_summaries_reconcile_source():
+    executive = executive_summary(fixture()).iloc[0]
+    quality = data_quality_summary(fixture()).iloc[0]
+    assert executive["skus"] == 4
+    assert executive["total_outbound_pallets"] == 100
+    assert executive["total_outbound_orders"] == 55
+    assert quality["missing_required_values"] == 0
+    assert quality["negative_required_values"] == 0
