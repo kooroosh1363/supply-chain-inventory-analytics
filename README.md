@@ -1,62 +1,75 @@
-# DA-09 — Supply Chain & Inventory Analytics
+# Supply Chain Inventory Analytics
 
-Portfolio-grade operations analytics using the real/public **UCI Stock keeping units** dataset from a third-party logistics context.
+[![CI](https://github.com/kooroosh1363/supply-chain-inventory-analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/kooroosh1363/supply-chain-inventory-analytics/actions/workflows/ci.yml)
+[![Source validation](https://github.com/kooroosh1363/supply-chain-inventory-analytics/actions/workflows/source-validation.yml/badge.svg)](https://github.com/kooroosh1363/supply-chain-inventory-analytics/actions/workflows/source-validation.yml)
 
-## Business question
+Defensible SKU prioritization using a real public logistics dataset—without inventing inventory or supplier fields that the source does not contain.
 
-How should an operations team prioritize a large SKU portfolio when it has historical outbound demand, order frequency, handling characteristics, and shelf-life information—but does **not** have live stock balances or supplier lead times?
+## Decision supported
 
-DA-09 answers that question without inventing unsupported fields.
+How should an operations team prioritize a large SKU portfolio when it has historical outbound demand, order frequency, handling characteristics, and shelf-life information, but no live stock balance or supplier lead times?
 
-## What the project analyzes
+The pipeline produces:
 
-- total outbound pallet demand and outbound order frequency
-- ABC / Pareto-style SKU prioritization by demand contribution
-- fast / medium / slow order-frequency segmentation
+- ABC/Pareto prioritization by outbound pallet demand
+- fast, medium, and slow order-frequency segments
 - average pallets per outbound order
 - shelf-life bands for expiry-sensitive handling context
-- handling-intensity proxy using outbound pallet demand and pallet height
-- executive KPI summary with reconciliation checks
+- gross-weight throughput as a physical-handling proxy
+- executive and data-quality summaries with reconciliation checks
 
-## Data source
+## Architecture
 
-UCI Machine Learning Repository — **Stock keeping units**, dataset ID 585, DOI `10.24432/C5G03C`, CC BY 4.0. See [DATA_SOURCE.md](DATA_SOURCE.md) for provenance and claim boundaries.
-
-Raw data is downloaded at runtime and excluded from Git:
-
-```bash
-python -m src.download_data
+```mermaid
+flowchart LR
+    A[UCI ZIP or local CSV] --> B[Schema and value validation]
+    B --> C[Metric preparation]
+    C --> D[ABC, velocity, shelf-life, handling]
+    D --> E[Six auditable CSV outputs]
 ```
 
-## Run locally
+## Quick start
+
+Requires Python 3.11+.
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pytest -q
+python -m pytest --quiet
 python -m src.download_data
 python -m src.run_analysis
 ```
 
-## Outputs
+For a deterministic offline demonstration:
 
-- `executive_summary.csv`
-- `abc_sku_prioritization.csv`
-- `velocity_segments.csv`
-- `shelf_life_risk.csv`
-- `handling_profile.csv`
+```bash
+python -m src.run_analysis \
+  --input tests/fixtures/sku_sample.csv \
+  --output-dir outputs
+```
 
-Generated outputs are intentionally excluded from version control and rebuilt by the pipeline.
+## Output contract
 
-## Analytical boundaries
+| File | Decision value |
+|---|---|
+| `data_quality_summary.csv` | Row, missing-value, duplicate-ID, and domain checks |
+| `executive_summary.csv` | Portfolio-level demand and ABC KPIs |
+| `abc_sku_prioritization.csv` | SKU demand contribution and A/B/C class |
+| `velocity_segments.csv` | Order-frequency segment for every SKU |
+| `shelf_life_risk.csv` | SKU, demand, and order totals by shelf-life band |
+| `handling_profile.csv` | SKU-level physical-throughput proxy |
 
-This dataset does **not** contain live on-hand inventory, reorder points, stockout events, supplier identifiers, supplier lead times, purchase orders, or shipment-delay records. Therefore this repository does not claim stockout prediction, fill-rate analysis, supplier scorecards, or lead-time performance.
+Generated outputs and raw data are intentionally excluded from version control. The pipeline recreates them from the selected input.
 
-`handling_intensity` is an interpretable operational **proxy**, not a measured labor-cost or warehouse-effort metric.
+## Data integrity and CI
 
-## Engineering quality
+Validation rejects empty inputs, missing required columns, duplicate SKU identifiers, non-numeric required values, negative operational values, and zero-total-demand ABC runs. Tests cover calculations, failure paths, reconciliation, and the end-to-end file contract.
 
-GitHub Actions installs dependencies, runs unit tests, downloads the official UCI dataset, executes the full pipeline, and validates every expected deliverable. Tests reconcile SKU population, total outbound demand, total order frequency, ABC demand shares, and segmentation coverage.
+Pull-request CI runs completely offline against an explicitly synthetic four-row fixture. A separate weekly/manual workflow exercises the official live download, so an external outage does not make ordinary code checks flaky.
 
-## Portfolio signal
+## Evidence and boundaries
 
-DA-09 demonstrates the ability to translate imperfect operational data into defensible supply-chain analytics while keeping a strict boundary between observed data, derived metrics, proxies, and unsupported business claims.
+The real source is UCI's **Stock keeping units** dataset (ID 585, CC BY 4.0). See [DATA_SOURCE.md](DATA_SOURCE.md) for acquisition and provenance.
+
+The source has no live inventory, reorder points, stockout events, supplier IDs, lead times, purchase orders, or shipment delays. Consequently, this project makes no claims about stockout prediction, fill rate, supplier performance, or lead-time performance. `gross_weight_throughput_kg` is a transparent proxy—not measured labor, warehouse effort, or cost.
+
+This is a production-oriented analytical portfolio project: reproducible, tested, and explicit about what its evidence can and cannot support.

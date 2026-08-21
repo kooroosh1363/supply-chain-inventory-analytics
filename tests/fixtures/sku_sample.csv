@@ -1,0 +1,6 @@
+id,unitprice,expire_date,outbound_number,total_outbound,pal_grossweight,pal_height,units_per_pal
+SKU-001,10,20,40,80,500,100,100
+SKU-002,20,120,10,15,600,120,80
+SKU-003,30,400,5,5,700,150,50
+SKU-004,40,60,0,0,450,80,120
+

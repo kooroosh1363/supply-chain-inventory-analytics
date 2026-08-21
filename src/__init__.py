@@ -1,1 +1,2 @@
-"""DA-09 supply chain and inventory analytics package."""
+"""Defensible SKU prioritization analytics for the UCI SKU dataset."""
+
